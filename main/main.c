@@ -61,30 +61,32 @@ void app_main(void)
             case WORK_CONNECTED:
                 // receive event
                 if (xQueueReceive(spp.data_queue, &spp_data, 500/portTICK_RATE_MS)) {
-                    // spp_debug((char *)spp_data, 10);
+                    // decode packet from controller
                     pakcet_decoding(&packet, spp_data, 10);
                     free(spp_data);
 
+                    // led bar command
                     if (packet.ledbar != 0) {
                         ledbar_toggle();
                     }
 
                     if (packet.brake != 0) {
-                        // emergency brake
+                        // brake command
                         driver_set_brake(BRAKE_MODE_MAX);
                         drive_mode = DRIVE_MODE_STOP;
                     } else if (battery_check() == false) {
+                        // battery low case
                         driver_emergency_brake();
                         ESP_LOGI(TAG, "Low Battery Power!");
                         ledbar_blink_start(1);
                         drive_mode = DRIVE_MODE_STOP;
                     } else {
+                        // drive command
                         driver_set_speed(packet.forward, packet.clockwise);
                     }       
                 } else {
                     // Disconnected event
                     driver_emergency_brake();
-                    // drive_mode = DRIVE_MODE_STOP;
                     if (!isConnected()) {
                         work = WORK_ADVERTISING;
                     }
@@ -92,6 +94,7 @@ void app_main(void)
             break;
         }
 
+        // User Button Event
         if (isButtonPressed()) {
             brake_mode_t brake = driver_get_brake_mode();
             switch (brake) {

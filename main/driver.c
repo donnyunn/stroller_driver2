@@ -8,6 +8,10 @@
 
 static const int RX_BUF_SIZE = 1024;
 
+#define DIRECT_CTRL 0
+#define SLOWSTART_CTRL 1
+#define IIR_FACTOR 64 // 1~256
+
 #define TXD1_PIN (GPIO_NUM_26)
 #define RXD1_PIN (GPIO_NUM_27)
 
@@ -17,9 +21,9 @@ static const int RX_BUF_SIZE = 1024;
 #define BRAKE1_CURRENT 2
 #define BRAKE2_CURRENT 5
 #define BRAKE3_CURRENT 7
-#define BRAKE4_CURRENT 10
+#define BRAKE4_CURRENT 50
 
-brake_mode_t brake_mode;
+brake_mode_t brake_mode = BRAKE_MODE_1;
 
 infoPackage info;
 driver_t * this;
@@ -226,69 +230,135 @@ brake_mode_t driver_get_brake(void)
 
 void driver_emergency_brake(void)
 {
+    // setRPM(0, UART_NUM_1);
+    // setRPM(0, UART_NUM_2);
     setBrakeCurrent(BRAKE4_CURRENT, UART_NUM_1);
     setBrakeCurrent(BRAKE4_CURRENT, UART_NUM_2);
 }
 
+#define _DUTY 0
+#define _CURR 0
+#define _RPM  1
+#define RPM_LIMIT_1 1000
+#define RPM_LIMIT_2 1500
 void driver_set_speed(int16_t speed, int16_t steering)
 {
-    float _speed = (float)speed*0.00015;
+#if _DUTY
+    /* for duty */
+    float _speed = (float)speed*0.0002;
     float _steering = (float)steering*0.0001;
-    float dutyR, dutyL;
+    static float dutyR = 0;
+    static float dutyL = 0;
+    float tmpR, tmpL;
+#elif _CURR
+    /* for current */
+    float _speed = (float)speed*0.005;
+    float _steering = (float)steering*0.003;
+    float currR, currL;
+#elif _RPM
+    /* for rpm */
+    float _speed = (float)speed;
+    float _steering = (float)steering;
+    static float rpmR = 0;
+    static float rpmL = 0;
+    float tmpR, tmpL;
+#endif
     ESP_LOGI(TAG, "%d, %d", speed, steering);
 
     if (speed == 0 && steering == 0) {
-        driver_set_brake(brake_mode);
+        // dutyR = 0;
+        // dutyL = 0;
+        // driver_set_brake(BRAKE_MODE_MAX);
+        rpmR = 0;
+        rpmL = 0;
+        setRPM(rpmR, UART_NUM_2);
+        setRPM(rpmL, UART_NUM_1);
     } else {
-        dutyR = _speed + _steering;
-        dutyL = _speed - _steering;
-        setDuty(dutyR, UART_NUM_2);
-        setDuty(dutyL, UART_NUM_1);
+#if _CURR
+        currR = _speed + _steering;
+        currL = _speed - _steering;
+        setCurrent(currR, UART_NUM_2);
+        setCurrent(currL, UART_NUM_1);
+#elif _RPM  
+#if DIRECT_CTRL
+        rpmR = _speed + _steering;
+        rpmL = _speed - _steering;
+#elif SLOWSTART_CTRL
+        tmpR = _speed + _steering;
+        tmpL = _speed - _steering;
+        /* IIR Filter */
+        if (tmpR > 0) {
+            if (rpmR < tmpR) {
+                rpmR = ((IIR_FACTOR-1)*rpmR + tmpR) / IIR_FACTOR;
+            } else {
+                rpmR = tmpR;
+            }
+        } else {
+            if (rpmR > tmpR) {
+                rpmR = ((IIR_FACTOR-1)*rpmR + tmpR) / IIR_FACTOR;
+            } else {
+                rpmR = tmpR;
+            }
+        }
+        if (tmpL > 0) {
+            if (rpmL < tmpL) {
+                rpmL = ((IIR_FACTOR-1)*rpmL + tmpL) / IIR_FACTOR;
+            } else {
+                rpmL = tmpL;
+            }
+        } else {
+            if (rpmL > tmpL) {
+                rpmL = ((IIR_FACTOR-1)*rpmL + tmpL) / IIR_FACTOR;
+            } else {
+                rpmL = tmpL;
+            }
+        }
+#endif
+        /* Upper Limit Cut */
+        if (brake_mode == BRAKE_MODE_1) {
+            if (rpmR > RPM_LIMIT_1) rpmR = RPM_LIMIT_1;
+            else if (rpmR < -RPM_LIMIT_1) rpmR = -RPM_LIMIT_1;
+            if (rpmL > RPM_LIMIT_1) rpmL = RPM_LIMIT_1;
+            else if (rpmL < -RPM_LIMIT_1) rpmL = -RPM_LIMIT_1;
+        } else if (brake_mode == BRAKE_MODE_2) {
+            if (rpmR > RPM_LIMIT_2) rpmR = RPM_LIMIT_2;
+            else if (rpmR < -RPM_LIMIT_2) rpmR = -RPM_LIMIT_2;
+            if (rpmL > RPM_LIMIT_2) rpmL = RPM_LIMIT_2;
+            else if (rpmL < -RPM_LIMIT_2) rpmL = -RPM_LIMIT_2;
+        }
+        setRPM(rpmR, UART_NUM_2);
+        setRPM(rpmL, UART_NUM_1);
+#endif
     }
-    
-    // if (speed == 0 && steering == 0) {
-    //     driver_set_brake(brake_mode);
-    // } else {
-    //     driver_set_brake(BRAKE_MODE_NONE);
-    // }
-    // this->speed = speed;
 }
 
-static void driver_tx_task(void *arg)
+static void driver_rx_task(void *arg)
 {
+    // static const char *RX_TASK_TAG = "RX2_TASK";
+    // esp_log_level_set(RX_TASK_TAG, ESP_LOG_INFO);
+    uint8_t* data = (uint8_t*) malloc(RX_BUF_SIZE+1);
     while (1) {
-        vTaskDelay(500 / portTICK_PERIOD_MS);
-        setVescValues();
-        // getVescValues();
+        getVescValues();
+        const int rxBytes = uart_read_bytes(UART_NUM_1, data, RX_BUF_SIZE, 1000 / portTICK_RATE_MS);
+        if (rxBytes > 0) {
+            unpackPayload(data, rxBytes, driver2_info);
+            if (rxBytes > 55) {
+                if (processReadPacket(driver2_info)) {
+                    ESP_LOGI(TAG, "avgMotorCurrent: %f", info.avgMotorCurrent);
+                    ESP_LOGI(TAG, "avgInputCurrent: %f", info.avgInputCurrent);
+                    ESP_LOGI(TAG, "dutyCycleNow: %f", info.dutyCycleNow);
+                    ESP_LOGI(TAG, "rpm: %ld", info.rpm);
+                    ESP_LOGI(TAG, "inputVoltage: %f", info.inpVoltage);
+                    ESP_LOGI(TAG, "ampHours: %f", info.ampHours);
+                    ESP_LOGI(TAG, "ampHoursCharges: %f", info.ampHoursCharged);
+                    ESP_LOGI(TAG, "tachometer: %ld", info.tachometer);
+                    ESP_LOGI(TAG, "tachometerAbs: %ld", info.tachometerAbs);
+                }
+            }
+        }
     }
+    free(data);
 }
-
-// static void driver_rx_task(void *arg)
-// {
-//     // static const char *RX_TASK_TAG = "RX2_TASK";
-//     // esp_log_level_set(RX_TASK_TAG, ESP_LOG_INFO);
-//     uint8_t* data = (uint8_t*) malloc(RX_BUF_SIZE+1);
-//     while (1) {
-//         const int rxBytes = uart_read_bytes(UART_NUM_1, data, RX_BUF_SIZE, 1000 / portTICK_RATE_MS);
-//         if (rxBytes > 0) {
-//             unpackPayload(data, rxBytes, driver2_info);
-//             if (rxBytes > 55) {
-//                 if (processReadPacket(driver2_info)) {
-//                     ESP_LOGI(TAG, "avgMotorCurrent: %f", info.avgMotorCurrent);
-//                     ESP_LOGI(TAG, "avgInputCurrent: %f", info.avgInputCurrent);
-//                     ESP_LOGI(TAG, "dutyCycleNow: %f", info.dutyCycleNow);
-//                     ESP_LOGI(TAG, "rpm: %ld", info.rpm);
-//                     ESP_LOGI(TAG, "inputVoltage: %f", info.inpVoltage);
-//                     ESP_LOGI(TAG, "ampHours: %f", info.ampHours);
-//                     ESP_LOGI(TAG, "ampHoursCharges: %f", info.ampHoursCharged);
-//                     ESP_LOGI(TAG, "tachometer: %ld", info.tachometer);
-//                     ESP_LOGI(TAG, "tachometerAbs: %ld", info.tachometerAbs);
-//                 }
-//             }
-//         }
-//     }
-//     free(data);
-// }
 
 void driver_init(driver_t* driver)
 {
@@ -316,6 +386,6 @@ void driver_init(driver_t* driver)
 
     // xTaskCreate(driver_rx1_task, "driver_rx1_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     // xTaskCreate(driver_tx1_task, "driver_tx1_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
-    // xTaskCreate(driver_rx_task, "driver_rx_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
-    xTaskCreate(driver_tx_task, "driver_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
+    xTaskCreate(driver_rx_task, "driver_rx_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
+    // xTaskCreate(driver_tx_task, "driver_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
 }

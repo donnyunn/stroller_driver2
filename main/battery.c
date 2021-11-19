@@ -13,7 +13,7 @@ bool battery_check(void)
     battery_level = adc1_get_raw(BATTERY_CHANNEL);
     // ESP_LOGI(TAG, "Battery Raw : %d", battery_level);
     // if (battery_level < 1800) return false; // 10-cell
-    if (battery_level < 1650) return false; // 6-cell
+    if (battery_level < 100) return false; // 6-cell
     else return true;
 }
 
