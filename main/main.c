@@ -59,42 +59,44 @@ void app_main(void)
                 }
             break;
             case WORK_CONNECTED:
-                // receive event
+                // 컨트롤러 명령 수신 이벤트 발생 처리 (timeout = 500ms)
                 if (xQueueReceive(spp.data_queue, &spp_data, 500/portTICK_RATE_MS)) {
-                    // decode packet from controller
+                    // 조이스틱 값 디코딩
                     pakcet_decoding(&packet, spp_data, 10);
                     free(spp_data);
 
-                    // led bar command
+                    // LED bar 제어 명령 처리
                     if (packet.ledbar != 0) {
                         ledbar_toggle();
                     }
 
                     if (packet.brake != 0) {
-                        // brake command
-                        driver_set_brake(BRAKE_MODE_MAX);
-                        drive_mode = DRIVE_MODE_STOP;
+                        // 브레이크 명령 처리
+                        driver_emergency_brake();
+
                     } else if (battery_check() == false) {
-                        // battery low case
+                        // Low-level Battery 상황
                         driver_emergency_brake();
                         ESP_LOGI(TAG, "Low Battery Power!");
                         ledbar_blink_start(1);
-                        drive_mode = DRIVE_MODE_STOP;
+
                     } else {
-                        // drive command
+                        // 주행 명령 처리
                         driver_set_speed(packet.forward, packet.clockwise);
+
                     }       
                 } else {
-                    // Disconnected event
+                    // 컨트롤러 명령 수신 대기 Timeout 상황
                     driver_emergency_brake();
                     if (!isConnected()) {
                         work = WORK_ADVERTISING;
                     }
+
                 }
             break;
         }
 
-        // User Button Event
+        // 사용자 버튼 이벤트 처리
         if (isButtonPressed()) {
             brake_mode_t brake = driver_get_brake_mode();
             switch (brake) {
